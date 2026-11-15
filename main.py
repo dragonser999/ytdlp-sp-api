@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 import subprocess
 import os
 import glob
-from fastapi.responses import FileResponse
 
 app = FastAPI()
 
@@ -13,8 +12,8 @@ def home():
 @app.get("/download")
 def download_audio(url: str):
     try:
-        # Downloads folder ഉണ്ടാക്കുന്നു
-        output_dir = "downloads"
+        # Absolute path ഉപയോഗിച്ച് ഡൗൺലോഡ് ഫോൾഡർ ഉറപ്പാക്കുന്നു
+        output_dir = os.path.abspath("downloads")
         os.makedirs(output_dir, exist_ok=True)
         
         # spotdl കമാൻഡ് റൺ ചെയ്യുന്നു
@@ -29,7 +28,7 @@ def download_audio(url: str):
         if not files:
             raise HTTPException(status_code=404, detail="No files found after download")
         
-        # ഏറ്റവും ഒടുവിൽ ഡൗൺലോഡ് ചെയ്ത ഫയലിന്റെ പാസ് കൊടുക്കുന്നു
+        # ഏറ്റവും ഒടുവിൽ ഡൗൺലോഡ് ചെയ്ത ഫയൽ എടുക്കുന്നു
         latest_file = max(files, key=os.path.getctime)
         
         return {

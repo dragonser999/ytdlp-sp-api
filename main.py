@@ -1,6 +1,9 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 import httpx
+import asyncio
+import zipfile
+import io
 from urllib.parse import quote
 
 app = FastAPI()
@@ -14,45 +17,72 @@ HEADERS = {
     "Referer": f"{BASE_URL}/"
 }
 
-# 1. Track / Playlist വിവരങ്ങളും Direct Download URL-ഉം ലഭിക്കാൻ
+async def fetch_single_audio(client: httpx.AsyncClient, track_url: str):
+    res = await client.post(f"{BASE_URL}/api/spotify", json={"url": track_url}, headers=HEADERS)
+    if res.status_code != 200:
+        return None, None
+    track = res.json().get("data", {}).get("track")
+    if not track or not track.get("downloadUrl"):
+        return None, None
+    
+    filename = f"{track['artist']} - {track['title']}.mp3".replace("/", "_")
+    audio_url = f"{BASE_URL}{track['downloadUrl']}?filename={quote(filename)}"
+    audio_res = await client.get(audio_url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": f"{BASE_URL}/"})
+    
+    if audio_res.status_code == 200:
+        return filename, audio_res.content
+    return None, None
+
 @app.get("/info")
-async def get_spotify_info(url: str = Query(..., description="Spotify Track or Playlist URL")):
+async def get_spotify_info(url: str = Query(...)):
     async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.post(f"{BASE_URL}/api/spotify", json={"url": url}, headers=HEADERS)
         if res.status_code != 200:
-            raise HTTPException(status_code=res.status_code, detail="Failed to fetch from upstream")
+            raise HTTPException(status_code=res.status_code, detail="Upstream error")
+        return res.json().get("data", {})
+
+@app.get("/download")
+async def download_spotify(url: str = Query(...)):
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        res = await client.post(f"{BASE_URL}/api/spotify", json={"url": url}, headers=HEADERS)
+        if res.status_code != 200:
+            raise HTTPException(status_code=res.status_code, detail="Upstream error")
         
         data = res.json().get("data", {})
-        
-        # Single track ആണെങ്കിൽ full download URL കൂടെ ചേർക്കുന്നു
-        if "track" in data and data["track"].get("downloadUrl"):
-            rel_path = data["track"]["downloadUrl"]
-            filename = f"{data['track']['artist']} - {data['track']['title']}.mp3"
-            data["track"]["fullAudioUrl"] = f"{BASE_URL}{rel_path}?filename={quote(filename)}"
-            
-        return data
 
-# 2. നേരിട്ട് MP3 ഫയൽ സ്ട്രീം / ഡൗൺലോഡ് ചെയ്യാൻ
-@app.get("/download")
-async def download_spotify_track(url: str = Query(..., description="Spotify Track URL")):
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        res = await client.post(f"{BASE_URL}/api/spotify", json={"url": url}, headers=HEADERS)
-        if res.status_code != 200:
-            raise HTTPException(status_code=res.status_code, detail="Upstream API error")
-        
-        track = res.json().get("data", {}).get("track")
-        if not track or not track.get("downloadUrl"):
-            raise HTTPException(status_code=400, detail="Only single track URLs are supported for direct download")
-        
-        filename = f"{track['artist']} - {track['title']}.mp3"
-        audio_url = f"{BASE_URL}{track['downloadUrl']}?filename={quote(filename)}"
-        
-        audio_res = await client.get(audio_url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": f"{BASE_URL}/"})
-        if audio_res.status_code != 200:
-            raise HTTPException(status_code=502, detail="Failed to fetch audio stream")
-            
-        return StreamingResponse(
-            iter([audio_res.content]),
-            media_type="audio/mpeg",
-            headers={"Content-Disposition": f'attachment; filename="{quote(filename)}"'}
-        )
+        # 1. Single Track ആണെങ്കിൽ നേരിട്ട് MP3 നൽകുന്നു
+        if "track" in data:
+            filename, content = await fetch_single_audio(client, url)
+            if not content:
+                raise HTTPException(status_code=502, detail="Failed to download track")
+            return StreamingResponse(
+                iter([content]),
+                media_type="audio/mpeg",
+                headers={"Content-Disposition": f'attachment; filename="{quote(filename)}"'}
+            )
+
+        # 2. Playlist / Album ആണെങ്കിൽ ZIP ഫയലായി നൽകുന്നു
+        if "collection" in data:
+            collection = data["collection"]
+            tracks = collection.get("tracks", [])
+            if not tracks:
+                raise HTTPException(status_code=404, detail="No tracks found")
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                for t in tracks:
+                    src = t.get("sourceUrl")
+                    if src:
+                        fname, content = await fetch_single_audio(client, src)
+                        if fname and content:
+                            zip_file.writestr(fname, content)
+
+            zip_buffer.seek(0)
+            zip_name = f"{collection.get('title', 'playlist')}.zip".replace("/", "_")
+            return StreamingResponse(
+                zip_buffer,
+                media_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{quote(zip_name)}"'}
+            )
+
+        raise HTTPException(status_code=400, detail="Invalid Spotify URL")

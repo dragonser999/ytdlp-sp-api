@@ -1,7 +1,4 @@
-FROM python:3.10-slim
-
-# Install ffmpeg (yt-dlp and spotdl require this)
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -10,5 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Render നൽകുന്ന PORT ഉപയോഗിക്കാൻ വേണ്ടി
-CMD uvicorn main:app --host 0.0.0.0 --port $PORT
+ENV PORT=8000
+EXPOSE 8000
+
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
